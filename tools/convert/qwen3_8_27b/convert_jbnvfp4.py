@@ -84,21 +84,27 @@ from tools.convert.qwen3_8_27b.convert import OFFICIAL_RESOURCE_SHA256
 MODEL_ID = "qwen3.8-27b"
 WEIGHTS_ID = "jbnvfp4"
 
-# --- model geometry (GGUF qwen35 KV; asserted at preflight) ----------------
+# --- model geometry (GGUF qwen35; shape-asserted at preflight) -------------
 HIDDEN = 5120
 FFN = 17408
 LAYERS = 64
-HEADS = 24
+HEADS = 24           # full-attention q heads (qwen35.attention.head_count)
 HEAD_DIM = 256
+KV_HEADS = HEADS // 6   # full-attention k/v heads (head_count_kv = 4)
+GDN_V_HEADS = 48       # GDN value heads (len blk.L.ssm_a)
+GDN_HEAD_V = 128       # GDN head_v dim (len blk.L.ssm_norm)
 VOCAB = 248320
-GDN_QKV_OUT = HEADS * 4 * HEAD_DIM        # 10240: q|k|v
-GDN_Z_OUT = HEADS * 2 * HEAD_DIM          # 6144:  z
-GDN_QKVZ_OUT = GDN_QKV_OUT + GDN_Z_OUT    # 16384
-FULL_QG_OUT = HEADS * HEAD_DIM            # 6144 rows of q or of gate
-FULL_KV_OUT = HEADS * HEAD_DIM            # 1024
+# GDN projection output rows (from the actual blk.L.attn_qkv / attn_gate
+# shapes; the GDN head geometry is NOT a multiple of the full-attention
+# HEADS/HEAD_DIM).  v = 48*128 = 6144 = z; q|k = 10240 - 6144 = 4096.
+GDN_QKV_OUT = 10240            # GDN q|k|v projection output (attn_qkv rows)
+GDN_Z_OUT = GDN_V_HEADS * GDN_HEAD_V   # 6144: z (attn_gate rows)
+GDN_QKVZ_OUT = GDN_QKV_OUT + GDN_Z_OUT # 16384
+FULL_QG_OUT = HEADS * HEAD_DIM         # 6144 rows of q, or of gate
+FULL_KV_OUT = KV_HEADS * HEAD_DIM      # 1024
 FULL_QKVZ_OUT = 2 * FULL_QG_OUT + 2 * FULL_KV_OUT  # 14336
-PROJ_OUT = HEADS * HEAD_DIM               # 6144: gdn output / attn output in-dim
-GATE_UP_OUT = 2 * FFN                     # 34816
+PROJ_OUT = HEADS * HEAD_DIM            # 6144: gdn output / attn output in-dim
+GATE_UP_OUT = 2 * FFN                  # 34816
 
 BF16 = "BF16"
 FP32 = "FP32"
@@ -277,16 +283,23 @@ def _f32_bytes(b: bytes) -> bytes:
         torch.from_numpy(np.frombuffer(b, np.float32)), FP32)
 
 
-def _direct(name: str, want: tuple, fmt: str) -> bytes:
+def _direct(name: str, want: tuple, fmt: str, fold1: bool = False) -> bytes:
     """Small GGUF tensor -> direct-format artifact object.
 
-    FP32 sources become the RNE BF16 cast for BF16 objects (the registered
+    ``fold1=True`` for the attention-family RMS norm gammas: the GGUF stores
+    the pre-folded ``1 + w`` (the loader multiplies by the stored value
+    after a plain RMS norm), while the artifact stores the unfolded ``w``
+    and the runtime applies ``1 + w`` itself (unit_offset).  ``g - 1`` is
+    exact: the stored f32 value is exactly ``1 + w_bf16``.  FP32 sources
+    otherwise become the RNE BF16 cast for BF16 objects (the registered
     transform for the direct BF16 format).  ``_orient`` handles the conv
     kernel's transposed arrival; everything else arrives in artifact
     orientation.
     """
     d = np.asarray(_src(name), dtype=np.float32)
-    d = np.ascontiguousarray(_orient(name, d, want))
+    if fold1:
+        d = d - np.float32(1.0)
+    d = np.ascontiguousarray(_orient(name, d, want)).copy()  # mmap is read-only
     t = torch.from_numpy(d)
     if fmt == BF16:
         t = t.to(torch.bfloat16)
@@ -357,7 +370,7 @@ class _LayerState:
                                        (f"blk.{l}.ffn_up.weight", r0, r1,
                                         self.dw_gu, bands["ffn_up"])), r1 - r0))
             dn: list[tuple] = []
-            for r0, r1 in _row_chunks(FFN, DOWN_ROW_TARGET):
+            for r0, r1 in _row_chunks(HIDDEN, DOWN_ROW_TARGET):
                 dn.append((pool.submit(_task_nvfp4,
                                        (f"blk.{l}.ffn_down.weight", r0, r1,
                                         self.dw_dn, bands["ffn_down"])), r1 - r0))
@@ -367,10 +380,10 @@ class _LayerState:
                 "mlp": "NVFP4",
                 "amax_gate": round(ag, 6), "amax_up": round(au, 6),
                 "amax_down": round(ad, 6),
-                "d_w_gate_up": float(np.frombuffer(self.dw_gu, np.float32)),
-                "d_w_down": float(np.frombuffer(self.dw_dn, np.float32)),
-                "input_div_gate_up": float(np.frombuffer(in_div_gu, np.float32)),
-                "input_div_down": float(np.frombuffer(in_div_dn, np.float32)),
+                "d_w_gate_up": struct.unpack("<f", self.dw_gu)[0],
+                "d_w_down": struct.unpack("<f", self.dw_dn)[0],
+                "input_div_gate_up": struct.unpack("<f", in_div_gu)[0],
+                "input_div_down": struct.unpack("<f", in_div_dn)[0],
             })
         else:
             gu = []
@@ -383,7 +396,7 @@ class _LayerState:
                                        (f"blk.{l}.ffn_up.weight", 0, r0, r1,
                                         bands["ffn_up"])), r1 - r0))
             dn = []
-            for r0, r1 in _row_chunks(FFN, DOWN_ROW_TARGET):
+            for r0, r1 in _row_chunks(HIDDEN, DOWN_ROW_TARGET):
                 dn.append((pool.submit(_task_fp8,
                                        (f"blk.{l}.ffn_down.weight", 0, r0, r1,
                                         bands["ffn_down"])), r1 - r0))
@@ -427,8 +440,8 @@ class _LayerState:
                                          bands["attn_output"])), r1 - r0))
         self.qkvz_futs, self.out_futs = qkvz, out
         try:
-            self.report["imatrix_counts_ffn_gate"] = float(
-                _imat(f"blk.{l}.ffn_gate.weight.counts"))
+            self.report["imatrix_counts_ffn_gate"] = _imat(
+                f"blk.{l}.ffn_gate.weight.counts").item()
         except KeyError:
             pass
         self.ready = True
@@ -458,7 +471,7 @@ def _producer_for(name: str):
     if name == "text/token_embedding":
         return lambda: _fp8_whole("token_embd.weight", (VOCAB, HIDDEN), None)
     if name == "text/final_norm":
-        return lambda: _direct("output_norm.weight", (HIDDEN,), BF16)
+        return lambda: _direct("output_norm.weight", (HIDDEN,), BF16, fold1=True)
     if name == "text/output_head":
         return lambda: _fp8_whole("output.weight", (VOCAB, HIDDEN), None)
     if name.startswith("text/layers/"):
@@ -467,10 +480,11 @@ def _producer_for(name: str):
         role = "/".join(parts[3:])
         st = LAYER_STATES[l]
         if role == "input_norm":
-            return lambda l=l: _direct(f"blk.{l}.attn_norm.weight", (HIDDEN,), BF16)
+            return lambda l=l: _direct(f"blk.{l}.attn_norm.weight", (HIDDEN,),
+                                       BF16, fold1=True)
         if role == "post_attention_norm":
             return lambda l=l: _direct(f"blk.{l}.post_attention_norm.weight",
-                                       (HIDDEN,), BF16)
+                                       (HIDDEN,), BF16, fold1=True)
         if role == "gdn/a_log":
             return lambda l=l: _direct(f"blk.{l}.ssm_a", (48,), FP32)
         if role == "gdn/dt_bias":
@@ -493,10 +507,10 @@ def _producer_for(name: str):
                 (FULL_QKVZ_OUT, HIDDEN), _parts(st.qkvz_futs))
         if role == "attention/query_norm":
             return lambda l=l: _direct(f"blk.{l}.attn_q_norm.weight",
-                                       (HEAD_DIM,), BF16)
+                                       (HEAD_DIM,), BF16, fold1=True)
         if role == "attention/key_norm":
             return lambda l=l: _direct(f"blk.{l}.attn_k_norm.weight",
-                                       (HEAD_DIM,), BF16)
+                                       (HEAD_DIM,), BF16, fold1=True)
         if role == "attention/output":
             return lambda st=st: _assemble_fp8(
                 (HIDDEN, PROJ_OUT), _parts(st.out_futs))
@@ -534,8 +548,23 @@ KV_CHECKS = (
     ("qwen35.embedding_length", HIDDEN),
     ("qwen35.feed_forward_length", FFN),
     ("qwen35.attention.head_count", HEADS),
-    ("qwen35.attention.head_count_kv", HEADS // 6),
+    ("qwen35.attention.head_count_kv", KV_HEADS),
     ("qwen35.nextn_predict_layers", 1),
+)
+
+# Source-tensor shapes that pin the geometry constants above.  Layer 0 is
+# GDN, layer 3 full-attention (l % 4 == 3).  Metadata orientation (in, out).
+SHAPE_CHECKS = (
+    ("blk.0.attn_qkv.weight", (HIDDEN, GDN_QKV_OUT)),
+    ("blk.0.attn_gate.weight", (HIDDEN, GDN_Z_OUT)),
+    ("blk.0.ssm_conv1d.weight", (4, GDN_QKV_OUT)),
+    ("blk.0.ssm_a", (GDN_V_HEADS,)),
+    ("blk.0.ssm_norm.weight", (GDN_HEAD_V,)),
+    ("blk.0.ssm_out.weight", (PROJ_OUT, HIDDEN)),
+    ("blk.3.attn_q.weight", (HIDDEN, 2 * FULL_QG_OUT)),
+    ("blk.3.attn_k.weight", (HIDDEN, FULL_KV_OUT)),
+    ("blk.3.attn_v.weight", (HIDDEN, FULL_KV_OUT)),
+    ("blk.3.attn_output.weight", (PROJ_OUT, HIDDEN)),
 )
 
 
@@ -546,6 +575,11 @@ def _preflight(layers: tuple[int, ...]) -> dict:
         kv[name] = got
         if got != want:
             raise ValueError(f"GGUF KV {name} = {got!r}, want {want!r}")
+
+    for name, want in SHAPE_CHECKS:
+        got = tuple(int(x) for x in G_SRC.get_tensor(SRC_IDS[name]).shape)
+        if got != tuple(want):
+            raise ValueError(f"GGUF tensor {name} shape = {got}, want {want}")
 
     for name in ("token_embd.weight", "output.weight", "output_norm.weight"):
         if name not in SRC_IDS:
@@ -576,7 +610,7 @@ def _preflight(layers: tuple[int, ...]) -> dict:
     for name in RESOURCE_NAMES:
         data = bytes(G_OLD.payload(name))
         sha = hashlib.sha256(data).hexdigest()
-        want = OFFICIAL_RESOURCE_SHA256[name.removeprefix("frontend/")]
+        want = OFFICIAL_RESOURCE_SHA256[name]
         if sha != want:
             raise ValueError(f"base artifact resource {name} sha256 {sha[:16]}... "
                              f"!= pinned {want[:16]}...")

@@ -183,6 +183,21 @@ Qwen3_6_35BA3BInstance::Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35B
 
 Qwen3_6_35BA3BInstance::~Qwen3_6_35BA3BInstance() = default;
 
+LoadedQwen4exp::LoadedQwen4exp(std::unique_ptr<Qwen4exp::LoadedModel> stable_model,
+                               const EngineOptions& options)
+    : model(std::move(stable_model)), frontend(Qwen4exp::make_frontend(*model, options)) {}
+
+LoadedQwen4exp::~LoadedQwen4exp() = default;
+
+Qwen4expInstance::Qwen4expInstance(std::unique_ptr<LoadedQwen4exp> stable_loaded,
+                                   runtime::KvCapacityResolution resolution,
+                                   Qwen4exp::SequencePlan sequence_plan, DeviceContext& device)
+    : loaded(std::move(stable_loaded)), kv_capacity_resolution(resolution),
+      capacity(sequence_plan.capacity()),
+      program(Qwen4exp::create_program(*loaded->model, std::move(sequence_plan), device)) {}
+
+Qwen4expInstance::~Qwen4expInstance() = default;
+
 ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& device) {
     validate_options(options);
     const auto load_start = Clock::now();
@@ -200,6 +215,10 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
     if (identity.model_id == Qwen3_6_35BA3B::model_id) {
         return construct_registered<Qwen3_6_35BA3B, LoadedQwen3_6_35BA3B, Qwen3_6_35BA3BInstance>(
             options, device, reader, load_start, Qwen3_6_35BA3B::target_key);
+    }
+    if (identity.model_id == Qwen4exp::model_id) {
+        return construct_registered<Qwen4exp, LoadedQwen4exp, Qwen4expInstance>(
+            options, device, reader, load_start, Qwen4exp::target_key);
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' has no registered target for this device");

@@ -2,6 +2,7 @@
 
 #include "core/device.h"
 #include "core/tensor.h"
+#include "targets/qwen4exp/impl/cpu/ple_hash.h"
 
 #include <cuda_runtime.h>
 
@@ -12,12 +13,6 @@
 #include <vector>
 
 namespace ninfer::targets::qwen4exp::detail {
-namespace {
-
-constexpr std::int32_t kPleHeadsUsed = 16; // heads 0-7 (2-gram) + 8-15 (3-gram)
-
-} // namespace
-
 // ---- HostArtifactView special members ----
 HostArtifactView::HostArtifactView(HostArtifactView&& other) noexcept
     : token_emb_off(other.token_emb_off),
@@ -90,24 +85,15 @@ void gather_token_embedding(const HostArtifactView& art, const TokenId* ids, std
 
 void gather_ple_layer1(const HostArtifactView& art, const TokenId* ids, std::int32_t i, std::int32_t T,
                        std::byte* out_bf16, cudaStream_t stream) {
-    // 16 heads, each a 160-dim row gathered from the PLE table. ctx0 = token i, ctx1 = i-1,
-    // ctx2 = i-2 (missing context pads to token 0). Heads 0-7 use a 2-gram (m0, m1), heads 8-15
-    // a 3-gram (m0, m1, m2). row_h = mixed % size_h + offset_h (u64 math).
+    // 16 heads, each a 160-dim row gathered from the PLE table. The row indices are the
+    // reference n-gram hash (compute_ple_rows: EOS-padded predecessors, EOS window cut).
+    // Row h of `out_bf16` receives the head-h table row. (void)T: position `i` fully
+    // determines the hash; the sequence length is carried by the caller's ring.
+    const auto rows = compute_ple_rows(i, ids, art.ple_multipliers, art.ple_head_offsets,
+                                       art.ple_head_vocab_sizes, cfg::ple_eos);
     std::vector<std::byte> row(ple_dim * 2U);
-    for (std::int32_t h = 0; h < kPleHeadsUsed; ++h) {
-        const std::int32_t c0 = (i >= 0) ? ids[i] : 0;
-        const std::int32_t c1 = (i - 1 >= 0) ? ids[i - 1] : 0;
-        std::uint64_t mixed =
-            static_cast<std::uint64_t>(c0) * art.ple_multipliers[0] ^
-            static_cast<std::uint64_t>(c1) * art.ple_multipliers[1];
-        if (h >= 8) {
-            const std::int32_t c2 = (i - 2 >= 0) ? ids[i - 2] : 0;
-            mixed ^= static_cast<std::uint64_t>(c2) * art.ple_multipliers[2];
-        }
-        const std::uint64_t offset = art.ple_head_offsets[h];
-        const std::uint64_t size = art.ple_head_vocab_sizes[h];
-        const std::uint64_t row_h = (size == 0 ? 0 : mixed % size) + offset;
-        const std::uint64_t off = art.ple_off + row_h * art.ple_row_bytes;
+    for (std::uint32_t h = 0; h < ple_n_heads; ++h) {
+        const std::uint64_t off = art.ple_off + rows[h] * art.ple_row_bytes;
         art.read_at(off, row.data(), ple_dim * 2U);
         if (cudaMemcpyAsync(out_bf16 + static_cast<std::size_t>(h) * ple_dim * 2U, row.data(),
                             ple_dim * 2U, cudaMemcpyHostToDevice, stream) != cudaSuccess) {

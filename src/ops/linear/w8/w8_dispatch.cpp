@@ -45,6 +45,35 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             if (t <= 48) { return launch_w8_small_t; }
             return launch_w8_mma_r64_c128;
         }
+        // qwen4exp: attention output and GDN output project [6144, 2560] -> [2560, T].
+        if (n == 2560) {
+            if (t <= 4) { return launch_w8_simt_r8_c4; }
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
+            return launch_w8_mma_r64_c128;
+        }
+        break;
+    case 2560:
+        // qwen4exp hidden-width rows: GDN q/k [4096,2560], GDN v/z [12288,2560],
+        // full-attention fused qkv [13312,2560], MoE shared gate/up [1280,2560].
+        switch (n) {
+        case 4096:
+        case 12288:
+        case 13312:
+        case 1280:
+            if (t <= 4) { return launch_w8_simt_r8_c4; }
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
+            return launch_w8_mma_r64_c128;
+        default:
+            break;
+        }
+        break;
+    case 640:
+        // qwen4exp MoE shared down [2560, 640].
+        if (n == 2560) {
+            if (t <= 4) { return launch_w8_simt_r8_c4; }
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
+            return launch_w8_mma_r64_c128;
+        }
         break;
     case 17408:
         if (n == 5120) {

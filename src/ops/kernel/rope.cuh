@@ -16,6 +16,7 @@ enum class RopeKernelMode : std::int32_t {
     Text1D,
     DflashText1D,
     TextMrope,
+    TextMropeSections,
     Vision2D,
 };
 
@@ -71,6 +72,10 @@ __device__ __forceinline__ void fixed_axis_frequency(int pair, int* axis, float*
     } else if constexpr (Mode == RopeKernelMode::DflashText1D) {
         *axis      = 0;
         *frequency = static_cast<float>(kDflashRopeInvFrequency[pair]);
+    } else if constexpr (Mode == RopeKernelMode::TextMropeSections) {
+        // Contiguous M-RoPE sections [11,11,10,0] over 32 dim-pairs (qwen3.8-flash-next).
+        *axis      = pair < 11 ? 0 : (pair < 22 ? 1 : 2);
+        *frequency = kTextRopeInvFrequency[pair];
     } else {
         *axis      = Mode == RopeKernelMode::TextMrope ? pair % 3 : 0;
         *frequency = kTextRopeInvFrequency[pair];
@@ -202,6 +207,10 @@ __device__ __forceinline__ void generic_axis_frequency(int axes, int head_dim, i
         *axis           = pair / 18;
         const int local = pair % 18;
         *exponent       = -2.0F * static_cast<float>(local) / 36.0F;
+    } else if (axes == 4) {
+        // Contiguous M-RoPE sections [11,11,10,0] over 32 dim-pairs (qwen3.8-flash-next).
+        *axis     = pair < 11 ? 0 : (pair < 22 ? 1 : 2);
+        *exponent = -2.0F * static_cast<float>(pair) / static_cast<float>(rotary_dim);
     } else {
         *axis     = axes == 3 ? pair % 3 : 0;
         *exponent = -2.0F * static_cast<float>(pair) / static_cast<float>(rotary_dim);

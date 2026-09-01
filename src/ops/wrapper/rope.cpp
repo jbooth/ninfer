@@ -36,8 +36,9 @@ std::int64_t numel_allow_zero(const Tensor& tensor, const char* label) {
 
 int position_axes(const Tensor& positions, std::int32_t tokens) {
     if (positions.ne[0] != tokens || positions.ne[2] != 1 || positions.ne[3] != 1 ||
-        (positions.ne[1] != 1 && positions.ne[1] != 2 && positions.ne[1] != 3)) {
-        throw std::invalid_argument("rope: positions must have shape [T], [T,2], or [T,3]");
+        (positions.ne[1] != 1 && positions.ne[1] != 2 && positions.ne[1] != 3 &&
+         positions.ne[1] != 4)) {
+        throw std::invalid_argument("rope: positions must have shape [T], [T,2], [T,3], or [T,4]");
     }
     return positions.ne[1];
 }
@@ -93,6 +94,9 @@ void require_model_mode(int axes, int rotary_dim, std::int32_t head_dim) {
     }
     if (axes == 3 && rotary_dim != 64) {
         throw std::invalid_argument("rope: 3-D Text MRoPE requires rotary_dim=64");
+    }
+    if (axes == 4 && rotary_dim != 64) {
+        throw std::invalid_argument("rope: 4-D Text MRoPE sections mode requires rotary_dim=64");
     }
 }
 

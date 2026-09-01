@@ -19,7 +19,7 @@ constexpr int kLargeBlockWaveCapacity = 1020;
 template <RopeKernelMode Mode>
 inline constexpr bool kTextMode =
     Mode == RopeKernelMode::Text1D || Mode == RopeKernelMode::TextMrope ||
-    Mode == RopeKernelMode::DflashText1D;
+    Mode == RopeKernelMode::TextMropeSections || Mode == RopeKernelMode::DflashText1D;
 
 std::int64_t token_stride(const Tensor* tensor) {
     return tensor == nullptr ? 0 : tensor->nb[2] / static_cast<std::int64_t>(sizeof(__nv_bfloat16));
@@ -99,6 +99,16 @@ bool launch_fixed_pair(const Tensor& positions, int rotary_dim, float theta, Ten
                 launch_fixed<RopeKernelMode::TextMrope, 24, 4>(positions, &q, &k, stream);
                 return true;
             }
+            if (axes == 4) {
+                launch_fixed<RopeKernelMode::TextMropeSections, 24, 4>(positions, &q, &k, stream);
+                return true;
+            }
+        }
+        if (q.ne[1] == 24 && k.ne[1] == 2) {
+            if (axes == 4) {
+                launch_fixed<RopeKernelMode::TextMropeSections, 24, 2>(positions, &q, &k, stream);
+                return true;
+            }
         }
         if (q.ne[1] == 16 && k.ne[1] == 2) {
             if (axes == 1) {
@@ -107,6 +117,10 @@ bool launch_fixed_pair(const Tensor& positions, int rotary_dim, float theta, Ten
             }
             if (axes == 3) {
                 launch_fixed<RopeKernelMode::TextMrope, 16, 2>(positions, &q, &k, stream);
+                return true;
+            }
+            if (axes == 4) {
+                launch_fixed<RopeKernelMode::TextMropeSections, 16, 2>(positions, &q, &k, stream);
                 return true;
             }
         }
@@ -132,6 +146,10 @@ bool launch_text_single(const Tensor& positions, int axes, Tensor& x, cudaStream
     }
     if (axes == 3) {
         launch_fixed_single<RopeKernelMode::TextMrope, Heads>(positions, x, stream);
+        return true;
+    }
+    if (axes == 4) {
+        launch_fixed_single<RopeKernelMode::TextMropeSections, Heads>(positions, x, stream);
         return true;
     }
     return false;

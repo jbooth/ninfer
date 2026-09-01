@@ -166,6 +166,35 @@ int run_bf16_linear() {
     return failures;
 }
 
+int run_bf16_qwen4exp() {
+    int failures = 0;
+    // qwen4exp rows: HC mixer (320/10240, 10240/320, 4/10240 inject via the tiny-n kernel),
+    // PLE key/value, indexer q/k, GDN a/b, and the output head. The T set spans the T=1 tuned
+    // GEMV and the MMA route (including non-block-multiple token counts).
+    constexpr std::int32_t kSmallT[] = {1, 2, 8, 33, 129};
+    DeviceWeight hc_down(make_patterned(320, 10240, 601U));
+    for (const std::int32_t tokens : kSmallT) { failures += run_bf16_linear_case(hc_down, tokens); }
+    DeviceWeight hc_up(make_patterned(10240, 320, 603U));
+    for (const std::int32_t tokens : kSmallT) { failures += run_bf16_linear_case(hc_up, tokens); }
+    DeviceWeight hc_inject(make_patterned(4, 10240, 605U));
+    for (const std::int32_t tokens : kSmallT) { failures += run_bf16_linear_case(hc_inject, tokens); }
+    DeviceWeight ple_key(make_patterned(10240, 2560, 607U));
+    for (const std::int32_t tokens : kSmallT) { failures += run_bf16_linear_case(ple_key, tokens); }
+    DeviceWeight ple_value(make_patterned(2560, 2560, 609U));
+    for (const std::int32_t tokens : kSmallT) { failures += run_bf16_linear_case(ple_value, tokens); }
+    DeviceWeight indexer_q(make_patterned(512, 2560, 611U));
+    for (const std::int32_t tokens : kSmallT) { failures += run_bf16_linear_case(indexer_q, tokens); }
+    DeviceWeight indexer_k(make_patterned(128, 2560, 613U));
+    for (const std::int32_t tokens : kSmallT) { failures += run_bf16_linear_case(indexer_k, tokens); }
+    DeviceWeight gdn_ab(make_patterned(96, 2560, 615U));
+    for (const std::int32_t tokens : kSmallT) { failures += run_bf16_linear_case(gdn_ab, tokens); }
+    // Output head [248320, 2560] is 1.27 GB of BF16; keep the token set small so the case fits
+    // the spare GPU memory next to the tenant process.
+    DeviceWeight output_head(make_patterned(248320, 2560, 617U));
+    for (const std::int32_t tokens : {1, 2, 8}) { failures += run_bf16_linear_case(output_head, tokens); }
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -175,7 +204,8 @@ int main() {
     }
 
     try {
-        const int failures = run_bf16_linear();
+        int failures = run_bf16_linear();
+        failures += run_bf16_qwen4exp();
         std::cout << (failures == 0 ? "OK" : "FAIL") << " BF16_A16 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

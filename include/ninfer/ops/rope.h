@@ -19,13 +19,17 @@ namespace ninfer::ops {
  *   DFlash full-head domain head_dim=rotary_dim=128; phi=positions[t]*theta^(-2*i/rotary_dim).
  * - Text MRoPE: positions I32 [T,3], head_dim=256, rotary_dim=64; pair i uses axis i%3 with
  *   the same frequency as Text 1-D.
+ * - Text MRoPE sections: positions I32 [T,4], head_dim=256, rotary_dim=64; contiguous
+ *   sections [11,11,10,0] over the 32 dim-pairs (pairs 0-10 use axis 0, pairs 11-21 axis 1,
+ *   pairs 22-31 axis 2; axis 3 has no pairs), same per-pair frequency as Text 1-D.
  * - Vision 2-D: positions I32 [T,2], head_dim=rotary_dim=72; pairs 0..17 use axis 0 and pairs
  *   18..35 use axis 1, each with local frequency theta^(-2*(i%18)/36).
  *
  * positions is contiguous and theta is positive and finite. Q/K tensors are BF16
  * [head_dim,heads,T] with positive head counts, contiguous head features and heads, and an optional
  * padded token stride. The registered optimized domains are D256/R64 Text Q/K head geometries
- * 24/4 and 16/2, D128/R128 1-D Text geometry 32/8, plus Vision geometry 16/16. q and k must not
+ * 24/4, 24/2 (sections), and 16/2, D128/R128 1-D Text geometry 32/8, plus Vision geometry 16/16.
+ * q and k must not
  * overlap one another or positions. The Op mutates only dimensions [0,rotary_dim) of the supplied
  * Q/K tensor storage. The oracle evaluates the rotated dimensions naively in FP64 from the
  * represented inputs. The updated BF16 values are promoted and compared directly with that result;

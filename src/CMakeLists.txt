@@ -70,8 +70,12 @@ add_library(ninfer_ops STATIC
   ops/launcher/embed_gather.cu
   ops/launcher/gdn_gating.cu
   ops/launcher/gelu.cu
+  ops/launcher/hc_mix.cu
   ops/launcher/l2norm.cu
   ops/launcher/layer_norm.cu
+  ops/launcher/ple_mix.cu
+  ops/launcher/qsa.cu
+  ops/sparse_moe_512x10/sparse_moe_512x10_kernels.cu
   ops/launcher/mtp_pack.cu
   ops/launcher/mtp_round.cu
   ops/launcher/speculative_round.cu
@@ -157,6 +161,7 @@ add_library(ninfer_ops STATIC
   ops/linear/bf16/bf16_gemv.cu
   ops/linear/bf16/bf16_gemm_mma.cu
   ops/linear/bf16/bf16_small_t.cu
+  ops/linear/bf16/bf16_tiny_gemm.cu
   ops/linear/bf16/bf16_dispatch.cpp
   ops/linear/fp8/fp8_format.cpp
   ops/linear/fp8/fp8_gemv.cu
@@ -243,6 +248,10 @@ add_library(ninfer_ops STATIC
   ops/wrapper/gdn_gating_proj.cpp
   ops/wrapper/gdn_input_proj.cpp
   ops/wrapper/gelu.cpp
+  ops/wrapper/hc_mix.cpp
+  ops/wrapper/ple_mix.cpp
+  ops/wrapper/qsa.cpp
+  ops/sparse_moe_512x10/sparse_moe_512x10.cpp
   ops/wrapper/attn_input_proj.cpp
   ops/wrapper/l2norm.cpp
   ops/wrapper/layer_norm.cpp

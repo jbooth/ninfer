@@ -57,6 +57,40 @@ void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStr
         launch_geometry<Bf16GemvGeometry<5120, 6144>>(x, weight, out, stream);
         return;
     }
+    // qwen4exp rows (T>=2 and the (10240,320) HC up row, whose k=320 fits no GEMV phase tiling):
+    // HC up [10240,320], HC down [320,10240], PLE key/value, output head, indexer q/k, GDN a/b.
+    if (weight.n == 10240 && weight.k == 320) {
+        launch_geometry<Bf16GemvGeometry<10240, 320>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 320 && weight.k == 10240) {
+        launch_geometry<Bf16GemvGeometry<320, 10240>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 10240 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<10240, 2560>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 2560 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<2560, 2560>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 248320 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<248320, 2560>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 512 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<512, 2560>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 128 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<128, 2560>>(x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 96 && weight.k == 2560) {
+        launch_geometry<Bf16GemvGeometry<96, 2560>>(x, weight, out, stream);
+        return;
+    }
     throw std::invalid_argument("bf16 linear MMA: unsupported exact problem");
 }
 

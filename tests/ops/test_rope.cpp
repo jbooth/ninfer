@@ -88,6 +88,10 @@ std::vector<double> rope_oracle(const std::vector<float>& input, const std::vect
                 if (geometry.axes == 2) {
                     axis     = pair / 18;
                     exponent = -2.0 * static_cast<double>(pair % 18) / 36.0;
+                } else if (geometry.axes == 4) {
+                    // Contiguous M-RoPE sections [11,11,10,0] (qwen3.8-flash-next).
+                    axis     = pair < 11 ? 0 : (pair < 22 ? 1 : 2);
+                    exponent = -2.0 * static_cast<double>(pair) / geometry.rotary_dim;
                 } else {
                     axis     = geometry.axes == 3 ? pair % 3 : 0;
                     exponent = -2.0 * static_cast<double>(pair) / geometry.rotary_dim;
@@ -426,6 +430,17 @@ int main() {
     failures +=
         run_pair_case({"35b text native-context tail", 256, 64, 1, 7, kTextTheta}, 16, 2, 262'137);
     failures += run_pair_case({"35b text mrope", 256, 64, 3, 7, kTextTheta}, 16, 2, 2048, 16, 8);
+
+    // qwen3.8-flash-next sections mode: 4 axes, contiguous sections [11,11,10,0], 24q/2kv.
+    // The 24/2 geometry is the registered fixed row; the padded and single forms reuse it.
+    failures += run_pair_case({"4exp sections decode", 256, 64, 4, 1, kTextTheta}, 24, 2, 1);
+    failures += run_pair_case({"4exp sections prefill", 256, 64, 4, 64, kTextTheta}, 24, 2, 30'001);
+    failures += run_pair_case({"4exp sections prefill padded", 256, 64, 4, 9, kTextTheta}, 24, 2,
+                               17, 8, 4);
+    failures +=
+        run_single_case({"4exp sections single k", 256, 64, 4, 5, kTextTheta}, 2, 101);
+    // An unregistered head count forces the generic fallback; the sections mapping must hold there.
+    failures += run_pair_case({"4exp sections generic-fallback", 256, 64, 4, 6, kTextTheta}, 8, 1, 9);
 
     // MTP bulk K append uses the single-tensor form; proposal tail uses the pair form above.
     failures += run_single_case({"27b mtp k mrope", 256, 64, 3, 128, kTextTheta}, 4, 8192);

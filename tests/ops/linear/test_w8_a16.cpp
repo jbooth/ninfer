@@ -136,6 +136,25 @@ int w8_a16_conformance() {
     failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
                           {2048, 16384, 283U, Comparison::Sampled, false, kN2048K16384});
 
+    // qwen4exp hidden-width rows (k=2560 GDN/full-attention/MoE-shared, k=6144 outputs, k=640
+    // MoE shared down). The T set spans the simt_r8_c4 (t<=4), simt_r8_c8 (t<=16), and
+    // mma_r64_c128 (t>16) routes.
+    constexpr std::array kQ4expT{
+        a16(1), a16(4), a16(5), a16(8), a16(16), a16(17), a16(128),
+    };
+    failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
+                          {4096, 2560, 501U, Comparison::Sampled, false, kQ4expT});
+    failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
+                          {12288, 2560, 503U, Comparison::Sampled, false, kQ4expT});
+    failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
+                          {13312, 2560, 505U, Comparison::Sampled, false, kQ4expT});
+    failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
+                          {1280, 2560, 507U, Comparison::Sampled, false, kQ4expT});
+    failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
+                          {2560, 6144, 509U, Comparison::Sampled, false, kQ4expT});
+    failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
+                          {2560, 640, 511U, Comparison::Sampled, false, kQ4expT});
+
     return failures;
 }
 

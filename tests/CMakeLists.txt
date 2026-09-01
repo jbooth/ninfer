@@ -213,6 +213,12 @@ set(ninfer_op_tests
   sigmoid_mul
   rmsnorm
   gated_rmsnorm
+  hc_mix
+  ple_mix
+  qsa_attention
+  qsa_split
+  qsa_indexer
+  sparse_moe_512x10
   l2norm
   gated_delta_net
   causal_conv1d_silu
@@ -346,3 +352,11 @@ foreach(test_target IN LISTS ninfer_qwen3_6_27b_internal_tests)
     ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
     ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 endforeach()
+
+# qwen4exp internal-contract tests (host-only; the PLE hash math has no CUDA dependency).
+ninfer_add_test(ninfer_qwen4exp_ple_hash_test
+  SOURCES targets/qwen4exp/test_ple_hash.cpp
+  LIBRARIES ninfer_artifact)
+target_include_directories(ninfer_qwen4exp_ple_hash_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen4exp/impl
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen4exp/export)

@@ -167,13 +167,32 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
                 auto* dst = &Sr[row * Cfg::SCALE_CACHE_BYTES];
                 if constexpr (Full) {
                     const std::int64_t gi = static_cast<std::int64_t>(grow) * kg + g0;
-                    cp_async<16, Cache::cg>(dst, &scales[gi * 2]);
+                    const std::uint8_t* src = &scales[gi * 2];
+                    if ((reinterpret_cast<std::uintptr_t>(src) & 0xfu) == 0) {
+                        cp_async<16, Cache::cg>(dst, src);
+                    } else {
+                        // Odd group counts (e.g. k=640 -> 20 groups/row) misalign the 16-byte
+                        // scale run; fall back to byte loads on that rare path.
+#pragma unroll
+                        for (int byte = 0; byte < 16; ++byte) { dst[byte] = src[byte]; }
+                    }
                 } else {
                     const bool valid_row   = output_tile.valid(grow, m);
                     const int valid_scales = valid_row && g0 < kg ? min(8, kg - g0) : 0;
                     const std::int64_t gi =
                         static_cast<std::int64_t>(valid_row ? grow : 0) * kg + min(g0, kg - 1);
-                    ninfer::ops::cp_async_zfill<16>(dst, &scales[gi * 2], valid_scales * 2);
+                    const std::uint8_t* src = &scales[gi * 2];
+                    if (valid_scales == 0) {
+#pragma unroll
+                        for (int byte = 0; byte < 16; ++byte) { dst[byte] = 0; }
+                    } else if ((reinterpret_cast<std::uintptr_t>(src) & 0xfu) == 0) {
+                        ninfer::ops::cp_async_zfill<16>(dst, src, valid_scales * 2);
+                    } else {
+#pragma unroll
+                        for (int byte = 0; byte < 16; ++byte) {
+                            dst[byte] = byte < valid_scales * 2 ? src[byte] : 0;
+                        }
+                    }
                 }
             }
         }

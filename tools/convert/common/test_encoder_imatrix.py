@@ -179,7 +179,7 @@ def test_row_split_reference_and_imatrix() -> None:
         return np.array(codes, np.int8), np.array(scales, np.float16)
 
     rng = np.random.default_rng(4)
-    for gs, qmax in ((64, 31), (32, 127)):
+    for gs, qmax in ((64, 31), (32, 127), (64, 127)):
         w = rng.standard_normal((48, 2560)).astype(np.float32)
         w[4, :64] = np.float32(1e-30)  # underflow-guard case (f16 -> 0)
         codes, scales = enc.encode_row_split(w, None, gs, qmax)
@@ -202,7 +202,7 @@ def test_row_split_reference_and_imatrix() -> None:
         e_im = werr(c_im, s_im)
         _check(e_im <= e_ref + 1e-6,
                f"int imatrix must not be worse gs={gs}: ref={e_ref:.6g} im={e_im:.6g}")
-    print("  row-split q6/w8: OK (96 rows x both shapes vs scalar MAXABS oracle)")
+    print("  row-split q6/w8/q8: OK (96 rows x all shapes vs scalar MAXABS oracle)")
 
 
 def test_decode_bound() -> None:
@@ -277,6 +277,55 @@ def test_per_row_bands() -> None:
     print("  per-row bands: OK (NVFP4 + Q6 == independent half encodes)")
 
 
+def test_q4_asymmetric() -> None:
+    # Q4: asymmetric codes [-8, 7], reference scale amax/7, no-band path
+    def oracle_int(w_row: np.ndarray, gs: int, qmin: int, qmax: int):
+        codes = []
+        scales = []
+        for g0 in range(0, w_row.shape[0], gs):
+            wg = w_row[g0:g0 + gs]
+            amax = float(np.abs(wg).max())
+            raw = np.float64(np.float32(amax)) / np.float64(qmax)
+            s = np.float32(raw).astype(np.float16).astype(np.float32)
+            if s == 0 and amax > 0:
+                s = np.float32(2.0 ** -24)
+            recip = np.float32(1.0 / np.float64(s))
+            for j in range(gs):
+                c = max(qmin, min(qmax, float(np.round(np.float32(wg[j] * recip)))))
+                codes.append(int(c))
+            scales.append(np.float16(s))
+        return np.array(codes, np.int8), np.array(scales, np.float16)
+
+    rng = np.random.default_rng(7)
+    # no-band path (MTP, D10) and banded path, gs=64, (qmin, qmax) = (-8, 7)
+    w = rng.standard_normal((48, 2560)).astype(np.float32)
+    w[3, :64] = np.float32(1e-30)  # underflow-guard case (f16 -> 0)
+    codes, scales = enc.encode_row_split(w, None, gs=64, qmax=7, qmin=-8)
+    _check(codes.shape == (48, 2560 // 64, 64), "q4 codes shape")
+    _check(scales.shape == (48, 2560 // 64), "q4 scales shape")
+    _check(int(codes.min()) >= -8 and int(codes.max()) <= 7,
+           f"q4 code range [{int(codes.min())}, {int(codes.max())}] must fit [-8, 7]")
+    for r in range(48):
+        c_ref, s_ref = oracle_int(w[r], 64, -8, 7)
+        _check(np.array_equal(codes[r].reshape(-1), c_ref),
+               f"q4 no-band codes parity r={r}")
+        _check(np.array_equal(scales[r], s_ref), f"q4 no-band scale parity r={r}")
+    # banded path: per-group s_ref still divides by qmax=7, codes clipped to [-8, 7]
+    band = np.abs(rng.standard_normal(2560)) ** 2
+    c_im, s_im = enc.encode_row_split(w, band, gs=64, qmax=7, qmin=-8)
+    _check(int(c_im.min()) >= -8 and int(c_im.max()) <= 7, "q4 banded code range")
+    # default qmin stays symmetric (-qmax): Q6/W8 call sites are byte-unchanged
+    c_sym, s_sym = enc.encode_row_split(w, None, gs=64, qmax=7)
+    _check(np.array_equal(c_sym, codes), "qmin default must be -qmax")
+    _check(np.array_equal(s_sym, scales), "qmin must not touch the scale")
+    # decode round-trip: |w - dec| <= 0.5 * s per element (code steps are s)
+    dec = codes.astype(np.float32) * scales.astype(np.float32)[:, :, None]
+    err = np.abs(w - dec.reshape(48, -1)).max()
+    smax = float(scales.max())
+    _check(err <= 0.5 * smax + 1e-6, f"q4 decode err {err:.6g} > 0.5*smax {0.5 * smax:.6g}")
+    print("  q4 asymmetric: OK (no-band + banded vs scalar oracle, range [-8, 7])")
+
+
 def main() -> None:
     print("encoder_imatrix self-tests")
     test_e4m3_words()
@@ -288,6 +337,7 @@ def main() -> None:
     test_decode_bound()
     test_divisors()
     test_per_row_bands()
+    test_q4_asymmetric()
     print("all self-tests passed")
 
 

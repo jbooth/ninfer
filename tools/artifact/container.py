@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mmap
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -413,6 +414,20 @@ class ArtifactWriter:
         self._cursor = obj.offset + obj.bytes
         self._next += 1
 
+    def skip(self, name: str) -> None:
+        """Advance past an object whose payload is supplied by an external
+        writer at the planned offset (position-independent writes)."""
+        if self._finished:
+            raise RuntimeError("artifact writer is already finished")
+        if self._next >= len(self.objects):
+            raise ArtifactError("artifact already has every planned payload")
+        obj = self.objects[self._next]
+        if name != obj.name:
+            raise ArtifactError(f"expected payload {obj.name}, got {name}")
+        self._file.seek(self.payload_offset + obj.offset + obj.bytes, os.SEEK_SET)
+        self._cursor = obj.offset + obj.bytes
+        self._next += 1
+
     def finish(self) -> None:
         if self._finished:
             return
@@ -421,6 +436,7 @@ class ArtifactWriter:
             raise ArtifactError(f"artifact is missing payload {missing}")
         self._file.truncate(self.payload_offset + self._cursor)
         self._file.flush()
+        os.fsync(self._file.fileno())
         self._file.close()
         self._finished = True
 

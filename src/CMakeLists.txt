@@ -233,6 +233,9 @@ add_library(ninfer_ops STATIC
   ops/sparse_moe/prefill/sparse_moe_prefill_plan.cpp
   ops/sparse_moe/small_t/sparse_moe_small_t_kernels.cu
   ops/sparse_moe/small_t/sparse_moe_small_t_plan.cpp
+  ops/sparse_moe_512x10/sparse_moe_512x10_kernels.cu
+  ops/sparse_moe_512x10/sparse_moe_512x10.cpp
+  ops/sparse_moe_512x10_cpu/sparse_moe_512x10_cpu.cpp
   ops/linear/linear.cpp
   ops/wrapper/add_bias.cpp
   ops/wrapper/argmax.cpp

@@ -59,6 +59,9 @@ ninfer_add_op_bench(ninfer_prepare_masked_block_bench
   SOURCES ops/prepare_masked_block_bench.cu)
 ninfer_add_op_bench(ninfer_sampling_select_bench SOURCES ops/sampling_select_bench.cu)
 ninfer_add_op_bench(ninfer_sparse_moe_bench SOURCES ops/sparse_moe_bench.cu)
+ninfer_add_op_bench(ninfer_sparse_moe_512x10_cpu_bench
+  SOURCES ops/sparse_moe_512x10_cpu_bench.cpp)
+target_link_libraries(ninfer_sparse_moe_512x10_cpu_bench PRIVATE Threads::Threads)
 ninfer_add_op_bench(ninfer_linear_pair_bench SOURCES ops/linear_pair_bench.cu)
 ninfer_add_op_bench(ninfer_mtp_pack_bench SOURCES ops/mtp_pack_bench.cu)
 ninfer_add_op_bench(ninfer_proposal_remap_bench SOURCES ops/proposal_remap_bench.cu)

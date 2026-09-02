@@ -95,6 +95,7 @@ NumericFormat parse_format(std::string_view name) {
     if (name == "Q5G64_F16S") { return NumericFormat::Q5G64_F16S; }
     if (name == "Q6G64_F16S") { return NumericFormat::Q6G64_F16S; }
     if (name == "W8G32_F16S") { return NumericFormat::W8G32_F16S; }
+    if (name == "Q8G64_F16S") { return NumericFormat::Q8G64_F16S; }
     if (name == "NVFP4") { return NumericFormat::NVFP4; }
     if (name == "FP8_E4M3FN_ROW_BF16S") { return NumericFormat::FP8_E4M3FN_ROW_BF16S; }
     throw ArtifactError("unknown tensor format: " + std::string(name));

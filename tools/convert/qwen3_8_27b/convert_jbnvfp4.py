@@ -917,7 +917,10 @@ def convert(args: argparse.Namespace) -> int:
             },
         }
         report_path = out_path.with_suffix(out_path.suffix + ".conversion.json")
-        report_path.write_text(json.dumps(report, indent=2) + "\n")
+        with open(report_path, "w") as rf:
+            rf.write(json.dumps(report, indent=2) + "\n")
+            rf.flush()
+            os.fsync(rf.fileno())
         print(f"[jbnvfp4-27b] done in {elapsed:.1f}s: "
               f"{file_bytes / 1e9:.3f} GB -> {out_path}", flush=True)
         print(f"[jbnvfp4-27b] report -> {report_path}", flush=True)

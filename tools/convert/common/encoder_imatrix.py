@@ -344,12 +344,18 @@ def encode_row_split(
     band: np.ndarray | None,
     gs: int,
     qmax: int,
+    qmin: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Encode W [n, k] (k % gs == 0) with per-row int-group quantization.
 
     Returns (codes int8 [n, k//gs, gs], scales f16 [n, k//gs]).
-    qmax: 31 (Q6) or 127 (W8).
+    qmax: 7 (Q4) / 31 (Q6) / 127 (W8). Reference scale is amax/qmax.
+    qmin: signed code lower bound; defaults to -qmax (symmetric). Q4 passes
+          (-8, 7) to use the asymmetric 4-bit range.
+    band: (k,) or (n, k) imatrix .in_sum2 band, or None for the no-band
+          reference path (MTP, D10: plain amax/qmax, no candidate search).
     """
+    qmin = -qmax if qmin is None else int(qmin)
     w = np.ascontiguousarray(w, dtype=np.float32)
     n, k = w.shape
     assert k % gs == 0, f"row-split requires k % gs == 0, got k={k} gs={gs}"
@@ -381,7 +387,7 @@ def encode_row_split(
         recip[pos] = np.float32(1.0 / s_ref[pos].astype(np.float64)).astype(
             np.float32
         )
-        codes = np.clip(np.round(wg * recip[..., None]), -qmax, qmax).astype(np.int8)
+        codes = np.clip(np.round(wg * recip[..., None]), qmin, qmax).astype(np.int8)
         return codes, scales_f16
 
     # Row-chunked search: [rc, g, 17, gs] temporaries would exceed worker
@@ -400,7 +406,7 @@ def encode_row_split(
         safe_cand = np.where(cand > 0, cand, np.float32(1.0))
         recip = np.float32(1.0 / safe_cand.astype(np.float64)).astype(np.float32)
         codes_all = np.clip(
-            np.round(wg_c[..., None, :] * recip[..., :, None]), -qmax, qmax
+            np.round(wg_c[..., None, :] * recip[..., :, None]), qmin, qmax
         )
         err = ((wg_c[..., None, :] - codes_all.astype(np.float32) * cand[..., :, None]) ** 2)
         err = err * band_c[..., None, :]
@@ -411,7 +417,7 @@ def encode_row_split(
         ).astype(np.float16)
         recip_best = np.take_along_axis(recip, best[..., None], axis=-1)[..., 0]
         codes_best[r0:r1] = np.clip(
-            np.round(wg_c * recip_best[..., None]), -qmax, qmax
+            np.round(wg_c * recip_best[..., None]), qmin, qmax
         ).astype(np.int8)
     return codes_best, scales_f16
 

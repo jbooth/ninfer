@@ -158,6 +158,8 @@ inline QuantSpec quant_spec(QType qtype) {
         return {6, 64, 31, -32};
     case QType::W8G32_F16S:
         return {8, 32, 127, -127};
+    case QType::Q8G64_F16S:
+        return {8, 64, 127, -128};
     default:
         throw std::invalid_argument("row-split test packer: unsupported qtype");
     }

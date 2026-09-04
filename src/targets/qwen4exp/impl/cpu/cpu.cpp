@@ -8,44 +8,50 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <sys/mman.h>
 #include <system_error>
 #include <unistd.h>
 #include <vector>
 
 namespace ninfer::targets::qwen4exp::detail {
 // ---- HostArtifactView special members ----
-HostArtifactView::HostArtifactView(HostArtifactView&& other) noexcept
-    : token_emb_off(other.token_emb_off),
-      token_emb_row_bytes(other.token_emb_row_bytes),
-      ple_off(other.ple_off),
-      ple_row_bytes(other.ple_row_bytes),
-      ple_multipliers(other.ple_multipliers),
-      ple_head_offsets(other.ple_head_offsets),
-      ple_head_vocab_sizes(other.ple_head_vocab_sizes),
-      routed(other.routed) {
-    fd = other.fd;
-    other.fd = -1;
+HostArtifactView::HostArtifactView(HostArtifactView&& other) noexcept {
+    *this = std::move(other);
 }
 
 HostArtifactView& HostArtifactView::operator=(HostArtifactView&& other) noexcept {
     if (this != &other) {
         if (fd >= 0) { ::close(fd); }
-        token_emb_off = other.token_emb_off;
+        if (map_base != nullptr) { ::munmap(map_base, static_cast<std::size_t>(map_bytes)); }
+        token_emb_off       = other.token_emb_off;
         token_emb_row_bytes = other.token_emb_row_bytes;
-        ple_off = other.ple_off;
-        ple_row_bytes = other.ple_row_bytes;
-        ple_multipliers = other.ple_multipliers;
-        ple_head_offsets = other.ple_head_offsets;
+        ple_off             = other.ple_off;
+        ple_row_bytes       = other.ple_row_bytes;
+        ple_multipliers     = other.ple_multipliers;
+        ple_head_offsets    = other.ple_head_offsets;
         ple_head_vocab_sizes = other.ple_head_vocab_sizes;
-        routed = other.routed;
-        fd = other.fd;
-        other.fd = -1;
+        layer_present       = other.layer_present;
+        mtp_present         = other.mtp_present;
+        vision_present      = other.vision_present;
+        routed              = other.routed;
+        mtp_routed          = other.mtp_routed;
+        moe_side            = other.moe_side;
+        mtp_moe_side        = other.mtp_moe_side;
+        file_bytes          = other.file_bytes;
+        fd                  = other.fd;
+        map_base            = other.map_base;
+        map_bytes           = other.map_bytes;
+        payload_off         = other.payload_off;
+        other.fd            = -1;
+        other.map_base      = nullptr;
+        other.map_bytes     = 0;
     }
     return *this;
 }
 
 HostArtifactView::~HostArtifactView() {
     if (fd >= 0) { ::close(fd); }
+    if (map_base != nullptr) { ::munmap(map_base, static_cast<std::size_t>(map_bytes)); }
 }
 
 void HostArtifactView::read_at(std::uint64_t off, void* destination, std::size_t bytes) const {
@@ -102,32 +108,6 @@ void gather_ple_layer1(const HostArtifactView& art, const TokenId* ids, std::int
         }
     }
     (void)T;
-}
-
-void stream_experts(const HostArtifactView& art, std::int32_t layer, const TokenId* router_row_dst,
-                    const std::uint8_t* selected_experts, std::int32_t topk, std::byte* gu_scratch,
-                    std::byte* dn_scratch, cudaStream_t stream) {
-    (void)router_row_dst;
-    const HostArtifactView::RoutedSpan& bank = art.routed[layer];
-    const std::size_t gu_slot = bank.gate_up_bytes / moe_experts;
-    const std::size_t dn_slot = bank.down_bytes / moe_experts;
-    for (std::int32_t k = 0; k < topk; ++k) {
-        const std::uint32_t e = selected_experts[k];
-        std::vector<std::byte> host_gu(gu_slot);
-        std::vector<std::byte> host_dn(dn_slot);
-        art.read_at(bank.gate_up_off + static_cast<std::uint64_t>(e) * gu_slot, host_gu.data(),
-                    gu_slot);
-        art.read_at(bank.down_off + static_cast<std::uint64_t>(e) * dn_slot, host_dn.data(), dn_slot);
-        auto* gu_k = gu_scratch + static_cast<std::size_t>(k) * gu_slot;
-        auto* dn_k = dn_scratch + static_cast<std::size_t>(k) * dn_slot;
-        if (cudaMemcpyAsync(gu_k, host_gu.data(), gu_slot, cudaMemcpyHostToDevice, stream) !=
-                cudaSuccess ||
-            cudaMemcpyAsync(dn_k, host_dn.data(), dn_slot, cudaMemcpyHostToDevice, stream) !=
-                cudaSuccess) {
-            throw std::system_error(std::make_error_code(std::errc::io_error),
-                                    "H2D of an expert slot failed");
-        }
-    }
 }
 
 } // namespace ninfer::targets::qwen4exp::detail

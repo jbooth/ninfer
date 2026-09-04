@@ -1,6 +1,6 @@
 #pragma once
 
-// qwen4exp (Qwen3.8-Flash-Next / jbnvfp4) family runtime contract.
+// qwen4exp (Qwen3.8-Flash-Next / jbq4) family runtime contract.
 //
 // Phase-2 skeleton: a single-target, non-templated family. It reuses the qwen3_6 frontend
 // (PreparedPrompt / OutputSession / PublishedOutput / Frontend) and the shared prepared-prompt

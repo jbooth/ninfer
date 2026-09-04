@@ -1,4 +1,4 @@
-// qwen4exp (Qwen3.8-Flash-Next / jbnvfp4) target package: the seven static factories plus the
+// qwen4exp (Qwen3.8-Flash-Next / jbq4) target package: the seven static factories plus the
 // LoadPlan / LoadedModel PIMPL bodies. Single-target, non-templated family; reuses the qwen3_6
 // frontend.
 
@@ -24,7 +24,7 @@ public:
         : weights_profile(weights_profile_in), materialization(std::move(materialization_in)),
           bundle(std::move(bundle_in)) {}
 
-    WeightsProfile weights_profile = WeightsProfile::Qwen4expJbNvfp4;
+    WeightsProfile weights_profile = WeightsProfile::Qwen4expJbQ4;
     artifact::MaterializationPlan materialization;
     BindBundle bundle;
 };
@@ -102,7 +102,7 @@ ModelSamplingDefaults Package::sampling_defaults(std::string_view model) {
 
 Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentity& identity) {
     if (identity.model_id == model_id && identity.weights_id == weights_id) {
-        return WeightsProfile::Qwen4expJbNvfp4;
+        return WeightsProfile::Qwen4expJbQ4;
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' is not supported by target '" + std::string(target_key) + "'");
@@ -121,8 +121,10 @@ Package::construct_loaded_model(LoadPlan&& plan, artifact::MaterializedArtifact&
     if (plan.impl_ == nullptr) { throw std::invalid_argument("target load plan is empty"); }
 
     detail::ModelView model;
-    // Move the host streaming view (owns the pread fd) into the model.
+    // Move the host streaming view (owns the pread fd + MAP_PRIVATE mapping) into the model.
     model.host = std::move(plan.impl_->bundle.host);
+    // Resolve the device ObjectHandles into the GPU weight views (JM4b load-side).
+    model.weights = detail::build_device_weights(materialized, plan.impl_->bundle.handles);
     model.frontend = qwen3_6::take_frontend_resources(materialized, plan.impl_->bundle.frontend);
     plan.impl_.reset();
     return std::unique_ptr<LoadedModel>(new LoadedModel(std::make_unique<LoadedModel::Impl>(
@@ -161,10 +163,12 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         geometry.ple_conv_history_bytes_per_sequence();
     const std::size_t minimum_reservation =
         static_cast<std::size_t>(max_concurrency) * per_sequence_state;
-    // Main KV + indexer side cache per token, times the page-group token count.
+    // Main KV + indexer side cache + MTP KV + MTP side cache per token, times the page-group
+    // token count.
     const std::size_t stride =
         static_cast<std::size_t>(kMainPageTokens) *
-        (geometry.main_kv_bytes_per_token() + geometry.side_cache_bytes_per_token());
+        (geometry.main_kv_bytes_per_token() + geometry.side_cache_bytes_per_token() +
+         geometry.mtp_kv_bytes_per_token() + geometry.mtp_side_cache_bytes_per_token());
 
     const runtime::SequenceCapacityCurve curve{
         .main_page_tokens                   = kMainPageTokens,

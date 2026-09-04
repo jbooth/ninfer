@@ -110,17 +110,9 @@ struct Program::Impl {
         // K0: gather the token embeddings (real CPU pread + H2D).
         gather_token_embedding(host, input.data(), B, x_ptr, stream);
 
-        // MoE expert streaming (real CPU): deterministic selection of the first `topk` experts.
-        const auto& bank = host.routed[0];
-        const std::size_t gu_slot = bank.gate_up_bytes / static_cast<std::size_t>(moe_experts);
-        const std::size_t dn_slot = bank.down_bytes / static_cast<std::size_t>(moe_experts);
-        ensure(expert_gu, static_cast<std::size_t>(moe_topk) * gu_slot);
-        ensure(expert_dn, static_cast<std::size_t>(moe_topk) * dn_slot);
-        std::vector<std::uint8_t> selected(moe_topk);
-        for (int k = 0; k < moe_topk; ++k) { selected[k] = static_cast<std::uint8_t>(k); }
-        stream_experts(host, 0, input.data(), selected.data(), moe_topk,
-                       static_cast<std::byte*>(expert_gu.p), static_cast<std::byte*>(expert_dn.p),
-                       stream);
+        // MoE: the stub no longer streams experts. The real decode dataflow (JM4b) calls
+        // `ninfer::ops::sparse_moe_512x10_cpu` over the page-cache bank views in `host.routed` /
+        // `host.moe_side` (zero-copy mmap), so no staging scratch is needed here.
 
         // Stub: the fused 48-layer dataflow + output head leave the logits at zero.
         CUDA_CHECK(cudaMemsetAsync(logits_ptr, 0, logits_bytes, stream));

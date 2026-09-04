@@ -1,6 +1,6 @@
 #pragma once
 
-// qwen4exp (Qwen3.8-Flash-Next / jbnvfp4) target package. Single-target, non-templated family.
+// qwen4exp (Qwen3.8-Flash-Next / jbq4) target package. Single-target, non-templated family.
 // Reuses the qwen3_6 frontend; owns its own identity-free execution surface (see runtime.h).
 
 #include "ninfer/types.h"
@@ -30,7 +30,7 @@ struct Package;
 namespace detail {
 
 enum class WeightsProfile : std::uint8_t {
-    Qwen4expJbNvfp4,
+    Qwen4expJbQ4,
 };
 
 // The plan produced by the binder. Carries the materialization plan (device / host / validate-only
@@ -83,7 +83,7 @@ private:
 
 struct Package {
     static constexpr std::string_view model_id   = "qwen3.8-flash-next";
-    static constexpr std::string_view weights_id = "jbnvfp4";
+    static constexpr std::string_view weights_id = "jbq4";
     static constexpr std::string_view target_key = "qwen4exp";
 
     using WeightsProfile             = detail::WeightsProfile;

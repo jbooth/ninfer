@@ -352,3 +352,15 @@ foreach(test_target IN LISTS ninfer_qwen3_6_27b_internal_tests)
     ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
     ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 endforeach()
+
+# jbq4 binding gate (JM4a): full 1,390-object table, D14 codec map, bank planes, host view.
+# Host-only (no CUDA, no device materialization); SKIP (77) when the 168 GiB artifact is absent.
+ninfer_add_test(ninfer_qwen4exp_bind_jbq4_test
+  SOURCES targets/qwen4exp/test_bind_jbq4.cpp
+  LIBRARIES ninfer_engine ninfer_artifact ninfer_core)
+target_include_directories(ninfer_qwen4exp_bind_jbq4_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen4exp/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen4exp/impl
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/impl)
+set_tests_properties(ninfer_qwen4exp_bind_jbq4_test PROPERTIES SKIP_RETURN_CODE 77)

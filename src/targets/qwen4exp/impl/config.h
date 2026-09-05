@@ -26,6 +26,10 @@ inline constexpr std::uint32_t vocab        = 248320;
 inline constexpr std::uint32_t is_full_attn_layer(std::uint32_t l) noexcept {
     return l % 4 == 3;
 }
+// PLE attaches to the second recurrent layer. The checkpoint config lists it 1-based as
+// `ple_layer_ids = [2]`; 0-based this is layer 1 (the converter's PLE_LAYER), which is GDN.
+inline constexpr std::uint32_t ple_layer = 1;
+inline constexpr bool is_ple_layer(std::uint32_t l) noexcept { return l == ple_layer; }
 inline constexpr std::uint32_t full_attn_layers = 12; // l in {3,7,...,47}
 inline constexpr std::uint32_t gdn_layers       = 36;
 

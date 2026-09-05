@@ -14,6 +14,32 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_w8_mma_r64_c128;
         }
         break;
+    case 2560:
+        // qwen4exp (jbq4) decode projections: GDN qk [4096,2560], GDN vz [12288,2560],
+        // QSA parent [13312,2560], and the MTP dense fc [2560,2560]. The SIMT/MMA kernels are
+        // shape-generic (runtime n,k,t), so the entry only selects the T-appropriate route.
+        switch (n) {
+        case 4096:
+        case 12288:
+        case 13312:
+        case 2560:
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
+            return launch_w8_mma_r64_c128;
+        default:
+            break;
+        }
+        break;
+    case 6144:
+        if (n == 2560) {
+            // qwen4exp block output projection (GDN output / QSA output) [2560,6144].
+            if (t <= 16) { return launch_w8_simt_r8_c8; }
+            return launch_w8_mma_r64_c128;
+        }
+        if (n == 5120) {
+            if (t <= 48) { return launch_w8_small_t; }
+            return launch_w8_mma_r64_c128;
+        }
+        break;
     case 5120:
         switch (n) {
         case 1024:
@@ -38,12 +64,6 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_w8_mma_r64_c128;
         default:
             break;
-        }
-        break;
-    case 6144:
-        if (n == 5120) {
-            if (t <= 48) { return launch_w8_small_t; }
-            return launch_w8_mma_r64_c128;
         }
         break;
     case 17408:

@@ -54,18 +54,29 @@ inline std::int16_t f32_to_bf16(float f) {  // round-to-nearest-even
     return static_cast<std::int16_t>(static_cast<std::uint16_t>(r >> 16));
 }
 inline float f16_to_f32(std::uint16_t h) {
-    const int s = (h >> 15) & 1;
-    const int e = (h >> 10) & 0x1F;
-    const int m = h & 0x3FF;
-    float v;
-    if (e == 0) {
-        v = (m / 1024.0f) * 0x0p-14f;  // subnormal
-    } else if (e == 0x1F) {
-        v = (m == 0) ? std::numeric_limits<float>::infinity() : std::nanf("");
+    // Exact bit-domain conversion (f16 values are exact in f32; no libm, no rounding).
+    const std::uint32_t s = (std::uint32_t)(h & 0x8000u) << 16;
+    const std::uint32_t e = (h >> 10) & 0x1F;
+    const std::uint32_t m = h & 0x3FF;
+    std::uint32_t bits;
+    if (e == 0x1F) {
+        bits = s | 0x7F800000u | (m << 13);  // inf / NaN
+    } else if (e == 0) {
+        if (m == 0) {
+            bits = s;  // +/- 0
+        } else {
+            // Subnormal: m * 2^-24, exact. With k = leading-bit position (k-1),
+            // value = 2^(k-25) * (1 + r * 2^-(k-1)), r = m ^ (1 << (k-1)),
+            // f32 mantissa field = r << (24-k) = (m << (24-k)) ^ (1 << 23).
+            const std::uint32_t k = 36u - __builtin_clz(m);  // 1..10
+            bits = s | ((k + 102u) << 23) | ((m << (24u - k)) ^ (1u << 23));
+        }
     } else {
-        v = (1.0f + m / 1024.0f) * std::ldexp(1.0f, e - 15);
+        bits = s | ((e + 112u) << 23) | (m << 13);
     }
-    return s ? -v : v;
+    float v;
+    std::memcpy(&v, &bits, 4);
+    return v;
 }
 inline float silu_f32(float x) { return x / (1.0f + std::exp(-x)); }
 inline float sigmoid_f32(float x) { return 1.0f / (1.0f + std::exp(-x)); }
@@ -82,16 +93,28 @@ inline float sigmoid_f32(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 //      Q8 pulls 256 i8 in once (4 x 512-bit loads), Q4 pulls 128 packed bytes in once
 //      (4 x 256-bit loads).
 //   2. Interleave into the window's 64 x 4-byte WIN[w] slots: WIN[w] lane l = u8w[l][4w..4w+3].
-//   3. Pull the window's 256 activation bytes and the 4 groups' per-row FP16 scales in once.
-//   4. Run the 64-wide microkernel over the L1-resident buffer once per 64-group:
-//      16 x vpdpbusd (u8 WIN x i8 activation broadcast) -> 16 int32 partial dots,
-//      subtract 128*S_g (S_g = sum of the group's 64 activation bytes) for the u8 bias,
-//      multiply by the per-row FP16 scale, accumulate into tmp16.
+//   3. Per group, one extra vpdpbusd (all-ones u8 weight x the 64 raw activation bytes)
+//      puts the 4-byte lane sums in i32; reducing the 16 lanes gives the group sum S_g for
+//      the u8-bias correction. The 16 activation 4-byte words are broadcast for the dot pass.
+//   4. Run the 64-wide microkernel over the L1-resident buffer once per 64-group, fully
+//      unrolled across the window:
+//      16 x vpdpbusd (u8 WIN x i8 activation broadcast) split over 4 int32 accumulators
+//      (4 slots each; 4-deep latency chains), 3-merge vpaddd (exact int32), subtract
+//      128*S_g, multiply by the per-row FP16 scale, accumulate into tmp16.
 // After all windows: out = ascale * tmp16.
 //
 // Row alignment: row_stride is always a multiple of the 64-code slice (32 B Q4 / 64 B Q8)
 // because K % 64 == 0, so each row's slice starts at a 32/64 B-aligned offset within the
 // 256 B-aligned base plane.
+//
+// The 64-wide dot pass is inlined with the 16 weight slots scoped to a single group, so
+// the register allocator keeps them (16 slots + 4 accumulators + temps ~= 21 ZMM) in
+// registers for the whole pass; scoping them across the unrolled window spills the
+// weights to the stack (vpdpbusd's u8 operand is register-only). The 16 dpbusd latency
+// chains are split over 4 int32 accumulators (4 slots each, 4-deep chains); the 3-merge
+// vpaddd is exact (int32, no overflow: the dot is bounded by |64*127*127| and the bias
+// correction is integer), so the group dot is bit-identical to the scalar reference
+// regardless of association order.
 void int8_gemv(ninfer::ops::MoeCode codec, const std::uint8_t* base, const std::uint16_t* scales,
                int n_rows, int k, const std::int8_t* aq, const float* ascale, int T, float* out) {
     const int groups = k / 64;
@@ -151,9 +174,10 @@ void int8_gemv(ninfer::ops::MoeCode codec, const std::uint8_t* base, const std::
                         }
                     }
                 }
-                // Pad missing rows: u8=128 means code=0, dpbusd contribution = 0.
+                // Pad missing rows: u8=128 means code=0, dpbusd contribution = 0. Only the
+                // active window region matters (the microkernel touches nw*16 slots/row).
                 for (int l = rows_this; l < 16; ++l) {
-                    std::memset(&u8w[l], 128, 256);
+                    std::memset(&u8w[l], 128, W);
                 }
 
                 // ---- 2. Interleave: u8w[l][p] -> win_data[w][l] (4-byte windows) ----
@@ -164,13 +188,30 @@ void int8_gemv(ninfer::ops::MoeCode codec, const std::uint8_t* base, const std::
                     }
                 }
 
-                // ---- 3. Activation: the window's W bytes in once (L1-resident); per-64 sums ----
-                std::int8_t act_win[256];
-                std::memcpy(act_win, aq_t + g0 * 64, W);
-                int Sg[4] = {};
+                // ---- 3. Per-group activation sum (u8-bias correction) ----
+                // The dpbusd u8 encoding carries a 128*a bias per byte: dot = intdot - 128*Sg,
+                // Sg = sum of the group's 64 activation bytes. One vpdpbusd with an all-ones
+                // u8 weight puts the 4-byte lane sums (16 lanes) into i32; the group sum is
+                // their reduction, so the pass stays pure VNNI with a tiny scalar fold.
+                const __m512i ones_u8 = _mm512_set1_epi8(1);
+                __m512i bcast[4][16];
+                int bias128[4] = {};
                 for (int c = 0; c < nw; ++c) {
-                    const std::int8_t* p = act_win + c * 64;
-                    for (int i = 0; i < 64; ++i) Sg[c] += p[i];
+                    const std::int8_t* pg = aq_t + (g0 + c) * 64;
+                    std::int32_t lane16[16];
+                    _mm512_storeu_epi32(
+                        lane16,
+                        _mm512_dpbusd_epi32(
+                            _mm512_setzero_si512(), ones_u8,
+                            _mm512_loadu_si512(reinterpret_cast<const __m512i*>(pg))));
+                    int Sg = 0;
+                    for (int i = 0; i < 16; ++i) Sg += lane16[i];
+                    bias128[c] = 128 * Sg;
+                    for (int w = 0; w < 16; ++w) {
+                        std::int32_t aw;
+                        std::memcpy(&aw, pg + 4 * w, 4);
+                        bcast[c][w] = _mm512_set1_epi32(aw);
+                    }
                 }
 
                 // ---- 4. Scales: the window's nw FP16 values per row in once ----
@@ -182,22 +223,31 @@ void int8_gemv(ninfer::ops::MoeCode codec, const std::uint8_t* base, const std::
                     }
                 }
 
-                // ---- 5. Run the 64-wide microkernel over the L1-resident buffer ----
+                // ---- 5. 64-wide microkernel, fully unrolled over the window ----
+                // Per group: 16 weight slots in registers, 16 x vpdpbusd over 4-deep
+                // int32 chains, exact 3-merge, u8-bias correction, scale, accumulate into
+                // tmp16. The next group's loads and broadcasts are independent of the
+                // previous group's merge/scale phase and issue behind it.
+#pragma GCC unroll 4
                 for (int c = 0; c < nw; ++c) {
-                    __m512i win[16];
+                    __m512i wreg[16];
                     for (int w = 0; w < 16; ++w) {
-                        const int gwin = c * 16 + w;
-                        win[w] =
-                            _mm512_loadu_si512(reinterpret_cast<const __m512i*>(&win_data[gwin][0]));
+                        wreg[w] = _mm512_loadu_si512(
+                            reinterpret_cast<const __m512i*>(&win_data[c * 16 + w][0]));
                     }
-                    __m512i acc = _mm512_setzero_si512();
+                    __m512i acc[4] = {
+                        _mm512_setzero_si512(), _mm512_setzero_si512(),
+                        _mm512_setzero_si512(), _mm512_setzero_si512()};
+#pragma GCC unroll 16
                     for (int w = 0; w < 16; ++w) {
-                        std::int32_t aw;
-                        std::memcpy(&aw, act_win + 4 * (c * 16 + w), 4);
-                        acc = _mm512_dpbusd_epi32(acc, win[w], _mm512_set1_epi32(aw));
+                        acc[w & 3] = _mm512_dpbusd_epi32(acc[w & 3], wreg[w], bcast[c][w]);
                     }
-                    acc = _mm512_sub_epi32(acc, _mm512_set1_epi32(128 * Sg[c]));
-                    __m512 af = _mm512_cvtepi32_ps(acc);
+                    __m512i gdot = acc[0];
+                    gdot = _mm512_add_epi32(gdot, acc[1]);
+                    gdot = _mm512_add_epi32(gdot, acc[2]);
+                    gdot = _mm512_add_epi32(gdot, acc[3]);
+                    gdot = _mm512_sub_epi32(gdot, _mm512_set1_epi32(bias128[c]));
+                    __m512 af = _mm512_cvtepi32_ps(gdot);
                     af = _mm512_mul_ps(af, _mm512_loadu_ps(sf[c]));
                     __m512 tr = _mm512_loadu_ps(tmp16);
                     tr = _mm512_add_ps(tr, af);

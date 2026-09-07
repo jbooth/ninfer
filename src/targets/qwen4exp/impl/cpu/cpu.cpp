@@ -76,38 +76,55 @@ void HostArtifactView::read_at(std::uint64_t off, void* destination, std::size_t
 // ---- CPU gather / streaming routines ----
 void gather_token_embedding(const HostArtifactView& art, const TokenId* ids, std::int32_t T,
                             std::byte* out_bf16, cudaStream_t stream) {
+    // [hidden, T] hidden-major: dim d of token t at out[d + t*hidden]. Each token row is read in
+    // one aligned pread and transposed into the hidden-major columns on the host before a single
+    // H2D (T is small, at most the batch width).
     std::vector<std::byte> host(static_cast<std::size_t>(T) * hidden * 2U);
-    for (std::int32_t i = 0; i < T; ++i) {
-        const std::int32_t token = ids[i];
-        const std::uint64_t off = art.token_emb_off + static_cast<std::uint64_t>(token) * art.token_emb_row_bytes;
-        art.read_at(off, host.data() + static_cast<std::size_t>(i) * hidden * 2U, hidden * 2U);
+    for (std::int32_t t = 0; t < T; ++t) {
+        const std::int32_t token = ids[t];
+        const std::uint64_t off =
+            art.token_emb_off + static_cast<std::uint64_t>(token) * art.token_emb_row_bytes;
+        art.read_at(off, host.data() + static_cast<std::size_t>(t) * hidden * 2U, hidden * 2U);
     }
-    if (cudaMemcpyAsync(out_bf16, host.data(), host.size(), cudaMemcpyHostToDevice, stream) !=
+    // Transpose row-major [T, hidden] -> column-major [hidden, T] (dim fastest).
+    std::vector<std::byte> out(host.size());
+    const auto* src = reinterpret_cast<const std::uint16_t*>(host.data());
+    auto* dst       = reinterpret_cast<std::uint16_t*>(out.data());
+    for (std::int32_t t = 0; t < T; ++t) {
+        const auto* row = src + static_cast<std::size_t>(t) * hidden;
+        for (std::int32_t d = 0; d < hidden; ++d) {
+            dst[d + static_cast<std::size_t>(t) * hidden] = row[d];
+        }
+    }
+    if (cudaMemcpyAsync(out_bf16, out.data(), out.size(), cudaMemcpyHostToDevice, stream) !=
         cudaSuccess) {
         throw std::system_error(std::make_error_code(std::errc::io_error),
                                 "H2D of the token embedding gather failed");
     }
 }
 
-void gather_ple_layer1(const HostArtifactView& art, const TokenId* ids, std::int32_t i, std::int32_t T,
-                       std::byte* out_bf16, cudaStream_t stream) {
-    // 16 heads, each a 160-dim row gathered from the PLE table. The row indices are the
-    // reference n-gram hash (compute_ple_rows: EOS-padded predecessors, EOS window cut).
-    // Row h of `out_bf16` receives the head-h table row. (void)T: position `i` fully
-    // determines the hash; the sequence length is carried by the caller's ring.
-    const auto rows = compute_ple_rows(i, ids, art.ple_multipliers, art.ple_head_offsets,
-                                       art.ple_head_vocab_sizes, cfg::ple_eos);
+void gather_ple_layer1_batch(const HostArtifactView& art, const TokenId* const* seqs,
+                             const std::int32_t* positions, std::int32_t B,
+                             std::byte* out_bf16, cudaStream_t stream) {
+    // [hidden, B] hidden-major: each lane's 16*160 = 2560-dim PLE residual is gathered (row-major
+    // per head) and placed into lane b's column (out + b*hidden). The PLE residual is the 16-head
+    // concat, which is exactly the hidden vector.
     std::vector<std::byte> row(ple_dim * 2U);
-    for (std::uint32_t h = 0; h < ple_n_heads; ++h) {
-        const std::uint64_t off = art.ple_off + rows[h] * art.ple_row_bytes;
-        art.read_at(off, row.data(), ple_dim * 2U);
-        if (cudaMemcpyAsync(out_bf16 + static_cast<std::size_t>(h) * ple_dim * 2U, row.data(),
-                            ple_dim * 2U, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
-            throw std::system_error(std::make_error_code(std::errc::io_error),
-                                    "H2D of a PLE embedding row failed");
+    for (std::int32_t b = 0; b < B; ++b) {
+        const auto rows = compute_ple_rows(positions[b], seqs[b], art.ple_multipliers,
+                                           art.ple_head_offsets, art.ple_head_vocab_sizes,
+                                           cfg::ple_eos);
+        std::byte* col = out_bf16 + static_cast<std::size_t>(b) * hidden * 2U;
+        for (std::uint32_t h = 0; h < ple_n_heads; ++h) {
+            const std::uint64_t off = art.ple_off + rows[h] * art.ple_row_bytes;
+            art.read_at(off, row.data(), ple_dim * 2U);
+            if (cudaMemcpyAsync(col + static_cast<std::size_t>(h) * ple_dim * 2U, row.data(),
+                                ple_dim * 2U, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+                throw std::system_error(std::make_error_code(std::errc::io_error),
+                                        "H2D of a PLE embedding row failed");
+            }
         }
     }
-    (void)T;
 }
 
 } // namespace ninfer::targets::qwen4exp::detail

@@ -13,6 +13,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <cstddef>
+#include <stdexcept>
+
 #include <cstdint>
 #include <string>
 #include <system_error>
@@ -534,6 +538,11 @@ BindBundle bind_artifact(artifact::Binder& binder, const std::filesystem::path& 
 
     view.fd = fd;
     return BindBundle{std::move(view), std::move(handles), std::move(frontend)};
+}
+
+// HostArtifactView method definitions (declared in model_view.h; read_at is in cpu.cpp).
+const std::byte* HostArtifactView::map_ptr(std::uint64_t off) const noexcept {
+    return static_cast<const std::byte*>(map_base) + off;
 }
 
 } // namespace ninfer::targets::qwen4exp::detail

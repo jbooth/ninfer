@@ -2,6 +2,7 @@
 #include <ninfer/targets/qwen4exp/model_view.h>
 #include "targets/qwen4exp/impl/config.h"
 #include "targets/qwen4exp/impl/cpu/cpu.h"
+#include "targets/qwen4exp/impl/runtime/decode.h"
 #include "core/arena.h"
 #include "core/device.h"
 #include "core/dtype.h"
@@ -62,6 +63,9 @@ struct Program::Impl {
     DeviceBuffer sample_out;
     DeviceBuffer sample_pos;
 
+    // JM4b: the persistent per-lane device state + round scratch + load-time transform caches.
+    DecodeState decode_state;
+
     std::vector<TokenId> pending_tokens;        // stable storage for PendingBatch.tokens.
     std::vector<std::int32_t> pending_row_counts;
 
@@ -71,6 +75,7 @@ struct Program::Impl {
         : model(&model_), device(&device_) {
         plan = std::move(plan_);
         const std::uint32_t maxc = plan.max_concurrency();
+        const std::uint32_t kv_capacity = plan.kv_capacity();
         lanes.resize(maxc);
 
         std::vector<ops::SamplingConfig> cfgs(maxc);
@@ -90,51 +95,47 @@ struct Program::Impl {
         sample_pos = DeviceBuffer(static_cast<std::size_t>(maxc) * sizeof(std::int32_t));
         sample_ws = DeviceBuffer(ops::sampling_workspace_capacity_bytes(
             static_cast<std::int32_t>(vocab), 1, static_cast<std::int32_t>(maxc)));
+
+        // Allocate + zero the persistent per-lane state (GDN SSM/conv, QSA main KV + side cache,
+        // PLE history) and the round scratch. The load-time transforms then fill the derived
+        // caches (A_log inversion, conv transpose+cast, FP32->BF16 norm caches).
+        const std::size_t C = maxc;
+        const std::size_t KV = kv_capacity;
+        decode_state.max_concurrency = static_cast<std::int32_t>(C);
+        decode_state.kv_capacity     = static_cast<std::int32_t>(KV);
+        decode_state.gdn_ssm        = DeviceBuffer(gdn_state_bytes_per_sequence * C);
+        decode_state.gdn_conv_state = DeviceBuffer(gdn_conv_state_bytes_per_sequence * C);
+        decode_state.gdn_conv_w     = DeviceBuffer(std::uint64_t{gdn_layers} * 10240U * 4U * 2U);
+        decode_state.gdn_a_log      = DeviceBuffer(std::uint64_t{gdn_layers} * 48U * 4U);
+        decode_state.gdn_dt_bias    = DeviceBuffer(std::uint64_t{gdn_layers} * 48U * 4U);
+        decode_state.ple_conv_hist  = DeviceBuffer(ple_conv_history_bytes_per_sequence * C);
+        decode_state.qsa_kv_k       = DeviceBuffer(
+            std::uint64_t{full_attn_layers} * C * KV * 512U * 2U);
+        decode_state.qsa_kv_v       = DeviceBuffer(
+            std::uint64_t{full_attn_layers} * C * KV * 512U * 2U);
+        decode_state.qsa_side       = DeviceBuffer(
+            std::uint64_t{full_attn_layers} * C * KV * 128U * 2U);
+        decode_state.norm_cache     = DeviceBuffer(
+            std::uint64_t{gdn_layers} * 128U * 2U +
+            std::uint64_t{full_attn_layers} * (256U + 256U + 128U + 128U) * 2U);
+        constexpr std::size_t kDecodeScratchBytes = 256ULL * 1024 * 1024;
+        decode_state.scratch = DeviceBuffer(kDecodeScratchBytes);
+        decode_state.gdn_ssm.fill();
+        decode_state.gdn_conv_state.fill();
+        decode_state.ple_conv_hist.fill();
+        decode_state.qsa_kv_k.fill();
+        decode_state.qsa_kv_v.fill();
+        decode_state.qsa_side.fill();
+        decode_state.scratch.fill();
+        apply_load_time_transforms(decode_state, *model, device->stream);
     }
 
-    // Runs the (stubbed) 48-layer dataflow for `input` (host token ids) and samples one token per
-    // position.  The token embedding gather + MoE expert streaming are the real CPU components;
-    // the fused layer dataflow is a no-op that leaves the logits at zero.
-    std::vector<TokenId> run_forward(const std::span<const TokenId>& input) {
-        const int B = static_cast<int>(input.size());
+    // Runs the 48-layer decode/prefill dataflow for the B lanes in `round` and returns one
+    // sampled token id per lane. The real CPU components (token embedding + PLE gather, MoE CPU)
+    // and the GPU dataflow (HC mixers, GDN/QSA blocks, output head, sampling) all execute.
+    std::vector<TokenId> run_forward(const std::span<const RoundLane>& round) {
         const cudaStream_t stream = device->stream;
-        const HostArtifactView& host = model->host;
-
-        const std::size_t x_bytes      = static_cast<std::size_t>(hidden) * B * 2U;
-        const std::size_t logits_bytes = static_cast<std::size_t>(vocab) * B * 2U;
-        ensure(workspace, x_bytes + logits_bytes);
-        auto* base       = static_cast<std::byte*>(workspace.p);
-        auto* x_ptr      = base;
-        auto* logits_ptr = base + x_bytes;
-
-        // K0: gather the token embeddings (real CPU pread + H2D).
-        gather_token_embedding(host, input.data(), B, x_ptr, stream);
-
-        // MoE: the stub no longer streams experts. The real decode dataflow (JM4b) calls
-        // `ninfer::ops::sparse_moe_512x10_cpu` over the page-cache bank views in `host.routed` /
-        // `host.moe_side` (zero-copy mmap), so no staging scratch is needed here.
-
-        // Stub: the fused 48-layer dataflow + output head leave the logits at zero.
-        CUDA_CHECK(cudaMemsetAsync(logits_ptr, 0, logits_bytes, stream));
-
-        // Sampling (real GPU kernel).
-        std::vector<std::int32_t> pos(B);
-        for (int i = 0; i < B; ++i) { pos[i] = i; }
-        CUDA_CHECK(cudaMemcpyAsync(sample_pos.p, pos.data(), static_cast<std::size_t>(B) * 4,
-                                   cudaMemcpyHostToDevice, stream));
-        WorkspaceArena ws(DeviceSpan{sample_ws.p, sample_ws.bytes});
-        Tensor logits(logits_ptr, DType::BF16, {static_cast<std::int32_t>(vocab), B});
-        Tensor out(sample_out.p, DType::I32, {B});
-        Tensor positions(sample_pos.p, DType::I32, {B});
-        ops::sample(logits, out, static_cast<std::int32_t>(vocab),
-                    static_cast<const ops::SamplingConfig*>(sample_configs.p), positions,
-                    B > 1 ? ops::kSamplePurposeDecode : ops::kSamplePurposePrefill, ws, stream);
-
-        std::vector<TokenId> tokens(B);
-        CUDA_CHECK(cudaMemcpyAsync(tokens.data(), sample_out.p, static_cast<std::size_t>(B) * 4,
-                                   cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        return tokens;
+        return run_decode_round(decode_state, *model, model->host, stream, round);
     }
 
     PendingBatch make_batch(const void* owner, const std::span<const SequenceHandle>& rows,
@@ -262,8 +263,12 @@ PrefillProgress Program::advance_prefill(SequenceHandle sequence,
     auto& lane_state = impl_->lanes[sequence.lane().value];
     if (lane_state.tokens.empty()) { fail("advance_prefill: lane has no prompt tokens"); }
     const std::size_t T = lane_state.tokens.size();
-    std::span<const TokenId> last{lane_state.tokens.data() + T - 1, 1};
-    std::vector<TokenId> sampled = impl_->run_forward(last);
+    RoundLane lane;
+    lane.lane     = sequence.lane().value;
+    lane.sequence = std::span<const TokenId>(lane_state.tokens.data(), lane_state.tokens.size());
+    lane.position = static_cast<std::int32_t>(T) - 1;
+    std::vector<RoundLane> round{lane};
+    std::vector<TokenId> sampled = impl_->run_forward(round);
     lane_state.prefill_done = true;
     std::vector<SequenceHandle> rows{sequence};
     PrefillProgress out;
@@ -307,15 +312,18 @@ PendingBatch Program::decode(std::span<const SequenceHandle> rows,
     (void)budgets;
     if (timing) { *timing = runtime::ExecutionTiming{}; }
     const std::size_t B = rows.size();
-    std::vector<TokenId> input(B);
     std::vector<SequenceHandle> rows_copy(B);
+    std::vector<RoundLane> round(B);
     for (std::size_t i = 0; i < B; ++i) {
         auto& lane_state = impl_->lanes[rows[i].lane().value];
         if (lane_state.tokens.empty()) { fail("decode: lane has no tokens"); }
-        input[i]     = lane_state.tokens.back();
+        round[i].lane     = rows[i].lane().value;
+        round[i].sequence = std::span<const TokenId>(lane_state.tokens.data(),
+                                                     lane_state.tokens.size());
+        round[i].position = static_cast<std::int32_t>(lane_state.tokens.size()) - 1;
         rows_copy[i] = rows[i];
     }
-    std::vector<TokenId> sampled = impl_->run_forward({input.data(), B});
+    std::vector<TokenId> sampled = impl_->run_forward(round);
     return impl_->make_batch(static_cast<const void*>(this),
                              std::span<const SequenceHandle>{rows_copy.data(), B}, sampled);
 }

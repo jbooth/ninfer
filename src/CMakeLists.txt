@@ -238,6 +238,10 @@ add_library(ninfer_ops STATIC
   ops/sparse_moe_512x10/sparse_moe_512x10_kernels.cu
   ops/sparse_moe_512x10/sparse_moe_512x10.cpp
   ops/sparse_moe_512x10_cpu/sparse_moe_512x10_cpu.cpp
+  ops/launcher/hc_mix.cu
+  ops/wrapper/hc_mix.cpp
+  ops/launcher/qsa.cu
+  ops/wrapper/qsa.cpp
   ops/linear/linear.cpp
   ops/wrapper/add_bias.cpp
   ops/wrapper/argmax.cpp

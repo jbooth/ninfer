@@ -357,7 +357,7 @@ endforeach()
 # Host-only (no CUDA, no device materialization); SKIP (77) when the 168 GiB artifact is absent.
 ninfer_add_test(ninfer_qwen4exp_bind_jbq4_test
   SOURCES targets/qwen4exp/test_bind_jbq4.cpp
-  LIBRARIES ninfer_engine ninfer_artifact ninfer_core)
+  LIBRARIES ninfer_engine ninfer_artifact ninfer_core ninfer_ops)
 target_include_directories(ninfer_qwen4exp_bind_jbq4_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen4exp/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen4exp/impl
